@@ -226,5 +226,19 @@ def start_monitoring_loop(interval_seconds=60):
         
         time.sleep(interval_seconds)
 
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='台指期 PRZ 自動監控服務')
+    parser.add_argument('--single-run', '-s', action='store_true', help='僅執行一次監控檢查 (適合 GitHub Actions)')
+    parser.add_argument('--interval', '-i', type=int, default=60, help='監控檢查間隔秒數 (預設 60 秒)')
+    args = parser.parse_args()
+    
+    if args.single_run:
+        print("⚡ 執行單次即時監控檢查 (GitHub Cloud Actions)...")
+        run_single_check()
+    else:
+        start_monitoring_loop(args.interval)
+
 if __name__ == '__main__':
-    start_monitoring_loop(60)
+    main()
