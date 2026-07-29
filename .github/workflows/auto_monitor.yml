@@ -1,13 +1,13 @@
-name: PRZ 24/7 Real-Time Cloud Monitor
+name: PRZ 24/7 Real-Time Cloud Monitor (1-Minute High-Frequency)
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # GitHub Actions Cloud Cron (Every 5 minutes)
-  workflow_dispatch:        # Manual Trigger Button
+    - cron: '0 * * * *'  # 每小時自動啟動新輪次的 55分鐘高頻監控
+  workflow_dispatch:      # 手動按鈕啟動
 
 jobs:
   realtime-monitor:
-    name: Run Real-Time PRZ High-Confidence Signal Check
+    name: Continuous 1-Minute PRZ Live Monitor
     runs-on: ubuntu-latest
 
     steps:
@@ -25,11 +25,22 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pandas numpy
 
-      - name: Run Single-Check Auto Monitor & Email Alert
+      - name: Run Continuous 1-Minute Live Monitor Loop
         env:
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER || 'strange751204@gmail.com' }}
           GMAIL_RECEIVER: ${{ secrets.GMAIL_RECEIVER || 'brian555878@gmail.com' }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD || 'qaua nssw vztv ytbk' }}
           PYTHONUTF8: '1'
         run: |
-          python auto_monitor.py --single-run
+          python -c "
+          import time
+          from auto_monitor import run_single_check
+          print('🚀 GitHub 雲端伺服器高頻監控已啟動 (每 60 秒精準執行一次)...')
+          for minute in range(55):
+              try:
+                  run_single_check()
+              except Exception as e:
+                  print('⚠️ 監控過程異常:', e)
+              time.sleep(60)
+          print('✅ 本輪次 55 分鐘監控已完成，等待下一輪自動接續。')
+          "
