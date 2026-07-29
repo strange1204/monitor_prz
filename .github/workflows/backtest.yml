@@ -1,4 +1,4 @@
-name: PRZ Strategy 10-Year Backtest & Yearly Email Notification
+name: Data Verification Suite
 
 on:
   workflow_dispatch:
@@ -7,12 +7,12 @@ on:
       - main
 
 jobs:
-  run-backtest:
-    name: Run 10-Year Backtest Engine
+  verification-runner:
+    name: Run Data Verification Suite
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python 3.12
@@ -20,13 +20,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Python Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pandas numpy
 
-      - name: Execute 10-Year Backtest & Send Yearly Email Progress
+      - name: Execute Verification Analysis Process
         env:
           GMAIL_SENDER: ${{ secrets.GMAIL_SENDER || 'strange751204@gmail.com' }}
           GMAIL_RECEIVER: ${{ secrets.GMAIL_RECEIVER || 'brian555878@gmail.com' }}
@@ -35,10 +35,10 @@ jobs:
         run: |
           python backtest_prz_strategy.py
 
-      - name: Upload Backtest Results & Report to GitHub Cloud Artifacts
+      - name: Store Verification Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: prz-10year-backtest-artifacts
+          name: data-verification-artifacts
           path: |
             backtest_yearly_results.json
             backtest_trades.csv
