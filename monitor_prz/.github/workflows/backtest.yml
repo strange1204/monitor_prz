@@ -1,0 +1,44 @@
+name: PRZ Strategy 10-Year Backtest & Yearly Email Notification
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  run-backtest:
+    name: Run 10-Year Backtest Engine
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pandas numpy
+
+      - name: Execute 10-Year Backtest & Send Yearly Email Progress
+        env:
+          GMAIL_SENDER: ${{ secrets.GMAIL_SENDER || 'strange751204@gmail.com' }}
+          GMAIL_RECEIVER: ${{ secrets.GMAIL_RECEIVER || 'brian555878@gmail.com' }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD || 'qaua nssw vztv ytbk' }}
+          PYTHONUTF8: '1'
+        run: |
+          python backtest_prz_strategy.py
+
+      - name: Upload Backtest Results & Report to GitHub Cloud Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: prz-10year-backtest-artifacts
+          path: |
+            backtest_yearly_results.json
+            backtest_trades.csv
