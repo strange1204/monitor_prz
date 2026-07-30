@@ -6,6 +6,7 @@
 import sys
 import json
 import time
+import ssl
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
@@ -14,6 +15,9 @@ import numpy as np
 
 # 設定標準輸出編碼為 UTF-8
 sys.stdout.reconfigure(encoding='utf-8')
+
+# SSL 信任設定 (避免 SSL Certificate Signature Failure)
+SSL_CONTEXT = ssl._create_unverified_context()
 
 # 常數設定
 BASE_URL = 'https://ws.api.cnyes.com/ws/api/v1/charting/history'
@@ -49,17 +53,18 @@ def fetch_kline(resolution: str, days_back: int = None) -> pd.DataFrame:
     params = {
         'symbol': SYMBOL,
         'resolution': resolution,
-        'from': start_time,
-        'to': now,
         'quote': '1'
     }
+    if resolution != 'D':
+        params['from'] = start_time
+        params['to'] = now
     
     query_string = urllib.parse.urlencode(params)
     url = f"{BASE_URL}?{query_string}"
     
     try:
         req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=SSL_CONTEXT) as resp:
             raw_data = resp.read().decode('utf-8')
             json_data = json.loads(raw_data)
             
