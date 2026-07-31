@@ -22,6 +22,7 @@ from prz_calculator import calculate_multi_timeframe_prz, group_prz_levels, get_
 from trade_advisor import determine_trend, generate_full_advice
 from notifier import send_email_report
 from box_swing_detector import DAILY_MASTER_HIGH, DAILY_MASTER_LOW
+from check_fini_and_notify import check_and_notify_fini
 
 STATE_FILE = "C:\\monitor_PRZ\\last_notification_state.json"
 
@@ -209,6 +210,12 @@ def run_single_check():
                 })
         else:
             print(f"[{now_str}] ℹ️ 偵測到高信心水準訊號，但與前次通知內容相同，跳過重複發送。")
+
+    # 檢查今日三大法人外資現貨買賣超數據是否發布
+    try:
+        check_and_notify_fini()
+    except Exception as e:
+        print(f"  ⚠️ 外資現貨數據檢查異常: {e}")
 
 
 def start_monitoring_loop(interval_seconds=60):
