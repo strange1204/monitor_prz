@@ -114,42 +114,10 @@ def fetch_10y_historical_data(tracker):
 
 def send_yearly_progress_email(year, yearly_stats, cum_stats):
     """
-    當完成某年份的回測時，發送 Email 通報逐年與累計勝率
+    當完成某年份的回測時，發送 Email 通報逐年與累計勝率 (已關閉發信通知)
     """
-    tz_tw = timezone(timedelta(hours=8))
-    now_str = datetime.now(tz_tw).strftime('%Y-%m-%d %H:%M:%S')
-    
-    subject = f"【PRZ 10年回測進度】{year} 年度已完成 - 逐年勝率: {yearly_stats['win_rate']:.1f}% | 累計勝率: {cum_stats['win_rate']:.1f}%"
-    
-    body = f"""親愛的 Brian 您好：
-
-台指期 PRZ 諧波交易策略【10年期歷史遞迴回測】進度更新通知！
-
-📅 已完成年份：{year} 年
-⏰ 處理時間：{now_str} (台灣時間)
-
-==================================================
-📊 【{year} 單一年度績效統計】
-  • 逐年交易次數：{yearly_stats['total_trades']} 次
-  • 逐年勝場/敗場：{yearly_stats['win_count']} 勝 / {yearly_stats['loss_count']} 敗
-  • ⭐ 逐年勝率：{yearly_stats['win_rate']:.2f} %
-  • 💰 逐年淨損益：{yearly_stats['pnl']:+,.0f} 點
-  • ⚖️ 逐年獲利因子(PF)：{yearly_stats['profit_factor']:.2f}
-
-📈 【自 2016 至 {year} 年 累計績效統計】
-  • 累計總交易次數：{cum_stats['total_trades']} 次
-  • 累計勝場/敗場：{cum_stats['win_count']} 勝 / {cum_stats['loss_count']} 敗
-  • 🏆 累計勝率：{cum_stats['win_rate']:.2f} %
-  • 💰 累計總淨損益：{cum_stats['pnl']:+,.0f} 點
-  • ⚖️ 累計獲利因子(PF)：{cum_stats['profit_factor']:.2f}
-==================================================
-
-詳細資料與 CSV 交易明細已同步儲存於 GitHub Artifact 暫存區。
-
-系統提示: 本郵件由 backtest_prz_strategy.py 自動執行發送。
-"""
-    print(f"\n📧 正在發送【{year} 年進度通知】至 Email...")
-    send_email_report(subject, body)
+    print(f"\nℹ️ 已跳過【{year} 年進度通知】Email 發送 (依使用者要求關閉)。")
+    return
 
 def run_backtest(df, tracker, mode=3, high_confidence_only=True, max_holding_days=10):
     """
