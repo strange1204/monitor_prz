@@ -24,9 +24,75 @@ BASE_URL = 'https://ws.api.cnyes.com/ws/api/v1/charting/history'
 SYMBOL = 'TWF:TXF:FUTURE'
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
+def convert_cnyes_price(series):
+    """
+    Cnyes API 偶爾會傳回合成指標比值（如 <100 或 9175），
+    將比值還原為真實台指期點位（如 44,500 點）。
+    """
+    def _convert(x):
+        if pd.isna(x):
+            return x
+        if x < 100:
+            return x * 1000
+        elif x < 10000:
+            return x * 10
+        return x
+    return series.apply(_convert)
+
+def fetch_kline_yahoo(resolution: str, days_back: int = None) -> pd.DataFrame:
+    """
+    Yahoo Finance (WTX=F) 備援抓取
+    """
+    if days_back is None:
+        if resolution == 'D': days_back = 180
+        elif resolution == '15': days_back = 14
+        elif resolution == '5': days_back = 7
+        else: days_back = 2
+        
+    interval_map = {'1': '1m', '5': '5m', '15': '15m', 'D': '1d'}
+    interval = interval_map.get(resolution, '1m')
+    
+    now = int(time.time())
+    start_time = now - (days_back * 24 * 60 * 60)
+    
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/WTX=F?symbol=WTX=F&period1={start_time}&period2={now}&interval={interval}"
+    
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=15, context=SSL_CONTEXT) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            
+            result = data.get('chart', {}).get('result', [])
+            if not result:
+                return pd.DataFrame()
+                
+            chart_data = result[0]
+            timestamps = chart_data.get('timestamp', [])
+            indicators = chart_data.get('indicators', {}).get('quote', [{}])[0]
+            
+            if not timestamps or not indicators:
+                return pd.DataFrame()
+                
+            df = pd.DataFrame({
+                'timestamp': pd.to_datetime(timestamps, unit='s', utc=True).tz_convert('Asia/Taipei'),
+                'open': indicators.get('open', []),
+                'high': indicators.get('high', []),
+                'low': indicators.get('low', []),
+                'close': indicators.get('close', []),
+                'volume': indicators.get('volume', [])
+            })
+            
+            df = df.dropna(subset=['close'])
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            return df
+    except Exception as e:
+        print(f"  ⚠️ Yahoo 備援抓取失敗 (resolution={resolution}): {str(e)}")
+        return pd.DataFrame()
+
+
 def fetch_kline(resolution: str, days_back: int = None) -> pd.DataFrame:
     """
-    抓取指定時間框架的K線資料
+    抓取指定時間框架的K線資料 (主要使用 cnyes, 失敗時自動備援 Yahoo)
     
     Args:
         resolution (str): 時間框架 ('1', '5', '15', 'D')
@@ -74,16 +140,12 @@ def fetch_kline(resolution: str, days_back: int = None) -> pd.DataFrame:
             if isinstance(data_field, dict):
                 status = data_field.get('s', status)
             
-            if not data_field:
-                print(f"  ⚠️ API 回應中沒有資料 (resolution={resolution}, status={status})")
-                return pd.DataFrame()
+            if not data_field or status != 'ok':
+                raise ValueError(f"API 回應異常 (status={status})")
             
             data = json_data['data']
-            
-            # 檢查資料欄位是否存在
             if 't' not in data or not data['t']:
-                print(f"  ⚠️ API 資料中缺少時間戳 (resolution={resolution})")
-                return pd.DataFrame()
+                raise ValueError(f"缺少時間戳")
             
         # 建立 DataFrame
         df = pd.DataFrame({
@@ -95,13 +157,17 @@ def fetch_kline(resolution: str, days_back: int = None) -> pd.DataFrame:
             'volume': data['v']
         })
         
+        # Cnyes 點位還原防呆
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = convert_cnyes_price(df[col])
+            
         # 排序與重設索引
         df = df.sort_values('timestamp').reset_index(drop=True)
         return df
         
     except Exception as e:
-        print(f"  ⚠️ 抓取K線資料失敗 (resolution={resolution}): {str(e)}")
-        return pd.DataFrame()
+        print(f"  ⚠️ Cnyes 抓取失敗 ({str(e)})，自動切換至 Yahoo Finance 備援...")
+        return fetch_kline_yahoo(resolution, days_back)
 
 
 def resample_df(df, rule):
@@ -188,9 +254,38 @@ def fetch_all_timeframes() -> dict:
     return results
 
 
+def fetch_all_timeframes_v2() -> dict:
+    """
+    抓取所有時間框架的資料，包含 30 分 K（由 5 分 K 重新取樣產生）。
+    回傳的 key: 'D', '30', '15', '5', '1'
+    
+    Returns:
+        dict: 包含各個時間框架 DataFrame 的字典
+    """
+    # 先取得基本四個時間框架
+    results = fetch_all_timeframes()
+    
+    # 產生 30 分 K（由 5 分 K 重新取樣）
+    df_5 = results.get('5', pd.DataFrame())
+    if not df_5.empty:
+        print("  📡 生成 30分K 資料（由 5分K 重新取樣）...")
+        results['30'] = resample_df(df_5, '30min')
+    else:
+        # 若 5 分 K 無資料，嘗試用 15 分 K 重新取樣
+        df_15 = results.get('15', pd.DataFrame())
+        if not df_15.empty:
+            print("  📡 生成 30分K 資料（由 15分K 重新取樣）...")
+            results['30'] = resample_df(df_15, '30min')
+        else:
+            print("  ⚠️ 無法產生 30分K（缺少 5分K 與 15分K 資料）")
+            results['30'] = pd.DataFrame()
+    
+    return results
+
+
 if __name__ == '__main__':
     price, ts = get_current_price()
     print(f"目前最新價格: {price} 於 {ts}")
-    all_data = fetch_all_timeframes()
+    all_data = fetch_all_timeframes_v2()
     for res, df in all_data.items():
         print(f"框架 {res}: 共 {len(df)} 筆資料")

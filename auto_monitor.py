@@ -1,10 +1,10 @@
 """
-台指期 PRZ 每分鐘即時監控與高信心水準 Email 觸發通報系統
+台指期 PRZ V2 每分鐘即時監控與高信心水準 Email 觸發通報系統
 =====================================================
-1. 每分鐘自動抓取台指期 1分K / 5分K / 15分K / 日K 最新數據
-2. 採用【Mode 3 雙演算法優點融合模式】計算 PRZ 超級共振與交易建議
-3. 當發現【信心水準：高】且與【前一次發送之通知內容不同】時，自動觸發 Gmail Email 寄送
-4. 避免重複垃圾郵件干擾，並持續於終端機印出即時監控日誌
+1. 僅在台指期交易時間段內執行每分鐘監控與分析。
+2. 採用 PRZ V2 整合分析引擎 (prz_v2_analyzer) 進行分析。
+3. 當發現【做多或做空方案的信心水準為高】且與【前一次發送之通知內容不同】時，自動發送 Email 警報。
+4. 在每天交易結束時檢查並通報三大法人現貨買賣超數據。
 """
 
 import sys
@@ -15,16 +15,49 @@ from datetime import datetime, timezone, timedelta
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# 匯入 PRZ 分析模組
-from data_fetcher import get_current_price, fetch_all_timeframes
-from hybrid_swing_detector import get_hybrid_swings
-from prz_calculator import calculate_multi_timeframe_prz, group_prz_levels, get_grouped_nearby_prz
-from trade_advisor import determine_trend, generate_full_advice
+# 匯入 PRZ V2 模組
+from prz_v2_analyzer import run_analysis
 from notifier import send_email_report
-from box_swing_detector import DAILY_MASTER_HIGH, DAILY_MASTER_LOW
 from check_fini_and_notify import check_and_notify_fini
 
 STATE_FILE = "C:\\monitor_PRZ\\last_notification_state.json"
+
+def is_trading_hours():
+    """
+    判定目前是否在台指期交易時間段內 (包含日盤與夜盤，排除週末休市)
+    - 日盤: 週一至週五 08:45 - 13:45
+    - 夜盤: 週一至週五 15:00 - 隔天 05:00 (週五夜盤交易至週六 05:00 結束)
+    """
+    tz_tw = timezone(timedelta(hours=8))
+    now = datetime.now(tz_tw)
+    weekday = now.weekday()  # 0 = Monday, ..., 6 = Sunday
+    hour = now.hour
+    minute = now.minute
+
+    # 週末休市 (週六 05:00 後至週日全天)
+    if weekday == 5:  # Saturday
+        # 週六凌晨 5 點前算週五夜盤的尾聲
+        if hour < 5:
+            return True
+        return False
+    elif weekday == 6:  # Sunday
+        return False
+        
+    # 週一開盤前的冷卻時段 (週一凌晨至 08:45 前不開盤)
+    elif weekday == 0:
+        if hour < 8 or (hour == 8 and minute < 45):
+            return False
+
+    # 平日開盤時段判定
+    # 1. 日盤 (08:45 - 13:45)
+    if (hour == 8 and minute >= 45) or (9 <= hour < 13) or (hour == 13 and minute <= 45):
+        return True
+        
+    # 2. 夜盤 (15:00 - 05:00 隔天)
+    if hour >= 15 or hour < 5:
+        return True
+
+    return False
 
 def load_last_state():
     """載入前一次發送 Email 通知的狀態"""
@@ -44,184 +77,170 @@ def save_last_state(state):
     except Exception as e:
         print(f"⚠️ 儲存通知狀態失敗: {e}")
 
-def build_email_template(current_price, nearby_prz, advice):
-    """使用經典行情與盤態樣板構建 Email 內文"""
+def build_email_template_v2(price, box_wr, trend_results, indicators, breakout, prz_result, advice):
+    """建立 V2 格式的美化 Email 內容"""
     tz_tw = timezone(timedelta(hours=8))
     now = datetime.now(tz_tw)
     
-    trend = advice.get('trend', {})
-    overall_trend = trend.get('overall_trend', '中性')
-    daily_macro = trend.get('daily_macro', '中性')
-    entry = advice.get('entry', {})
+    loc = box_wr['location']
     
     lines = []
     lines.append("親愛的 Brian 您好：\n")
-    lines.append("🚨【台指期 PRZ 高信心水準交易警報】🚨")
+    lines.append("🚨【台指期 PRZ V2 整合分析交易警報】🚨")
     lines.append("==========================================")
     lines.append(f"⏰ 分析時間：{now.strftime('%Y-%m-%d %H:%M:%S')} (台灣時間)")
-    lines.append(f"📊 台指期即時點位：{current_price:,.0f} 點")
+    lines.append(f"📊 即時點位：{price:,.0f} 點")
+    lines.append(f"📐 所在箱體：{loc['box_name']} ({loc['box_range'][0]:,.0f} ~ {loc['box_range'][1]:,.0f})")
+    lines.append(f"🎯 箱內位置：{loc['position_pct']*100:.1f}% (0%=下緣, 100%=上緣)")
+    if breakout.get('detail') and breakout.get('detail') != '尚未觸發':
+        lines.append(f"⚠️ 突破偵測：{breakout['detail']}")
     lines.append("==========================================\n")
     
-    lines.append(f"🏛️ 日線大方向：{daily_macro}")
-    lines.append(f"🔰 綜合趨勢研判：{overall_trend}")
-    lines.append(f"📌 進場建議：{entry.get('direction', '觀望')}")
-    if entry.get('entry_zone'):
-        lines.append(f"   建議進場區間：{entry['entry_zone'][0]:,.0f} ~ {entry['entry_zone'][1]:,.0f}")
-    lines.append(f"⭐ 信心水準：{entry.get('confidence', '高')} (🔥高信心水準觸發)")
-    lines.append(f"💡 判斷理由：{entry.get('reason', '-')}\n")
+    # 趨勢
+    overall = trend_results['overall']
+    lines.append(f"🔰 綜合趨勢研判：{overall} (多方得分: {trend_results['bull_score']} / 空方得分: {trend_results['bear_score']})")
     
-    sl_list = advice.get('stop_loss', [])
-    if sl_list:
-        lines.append("🛑 建議停損點位 (Stop Loss)：")
-        for sl in sl_list:
-            lines.append(f"   - [{sl['label']}停損] {sl['price']:,.0f} 點 (距離當前: {sl['distance']:,.0f} 點)")
-        lines.append("")
+    # 做多方案
+    long_plan = advice['long']
+    lines.append(f"\n🟢 做多方案 (推估勝率: {long_plan['win_rate']:.0f}%)")
+    lines.append(f"   • 信心水準：{long_plan['confidence']}")
+    lines.append(f"   • 建議進場：{long_plan['entry_zone'][0]:,.0f} ~ {long_plan['entry_zone'][1]:,.0f}")
+    lines.append("   • 停損點位：")
+    for sl in long_plan['stop_loss']:
+        lines.append(f"     - [{sl['label']}] {sl['price']:,.0f} (振幅: {sl['distance']}點 / {sl['pct']}%)")
+    lines.append("   • 停利點位：")
+    for tp in long_plan['take_profit']:
+        lines.append(f"     - [{tp['label']}] {tp['price']:,.0f} (振幅: {tp['distance']}點 / {tp['pct']}%)")
+    lines.append(f"   • 做多理由：{long_plan['reason']}")
+    
+    # 做空方案
+    short_plan = advice['short']
+    lines.append(f"\n🔴 做空方案 (推估勝率: {short_plan['win_rate']:.0f}%)")
+    lines.append(f"   • 信心水準：{short_plan['confidence']}")
+    lines.append(f"   • 建議進場：{short_plan['entry_zone'][0]:,.0f} ~ {short_plan['entry_zone'][1]:,.0f}")
+    lines.append("   • 停損點位：")
+    for sl in short_plan['stop_loss']:
+        lines.append(f"     - [{sl['label']}] {sl['price']:,.0f} (振幅: {sl['distance']}點 / {sl['pct']}%)")
+    lines.append("   • 停利點位：")
+    for tp in short_plan['take_profit']:
+        lines.append(f"     - [{tp['label']}] {tp['price']:,.0f} (振幅: {tp['distance']}點 / {tp['pct']}%)")
+    lines.append(f"   • 做空理由：{short_plan['reason']}")
+    
+    # 總結
+    summary = advice['summary']
+    lines.append(f"\n💡 推薦方向：{summary['recommended']}")
+    for r in summary.get('reasons', []):
+        lines.append(f"   • {r}")
         
-    tp_list = advice.get('take_profit', [])
-    if tp_list:
-        lines.append("🎯 建議停利點位 (Take Profit)：")
-        for tp in tp_list:
-            lines.append(f"   - [{tp['label']}停利] {tp['price']:,.0f} 點 (距離當前: {tp['distance']:,.0f} 點)")
-        lines.append("")
+    lines.append("\n🎯 關鍵 PRZ 點位參考 (一般與進階):")
+    above = prz_result['nearby'].get('above', [])
+    for lvl in reversed(above[:3]):
+        dist = lvl['price'] - price
+        dist_pct = (dist / price) * 100
+        is_adv = lvl.get('is_resonance')
+        cat = "【進階】" if is_adv else "【一般】"
+        lines.append(f"   - 壓力 {cat}: {lvl['price']:,.0f} (+{dist:.0f}點 / +{dist_pct:.2f}%)")
         
-    lines.append("📍 附近 Key PRZ 價位 (雙模型超級共振與去重結果)：")
-    lines.append("  【上方壓力 PRZ】:")
-    for lvl in nearby_prz.get('above', [])[:3]:
-        combos = " | ".join(lvl.get('combo_details', []))
-        count = len(lvl.get('combo_details', []))
-        tag = f"🔥超級共振 {count}組" if count > 1 else "單一組合"
-        lines.append(f"   - {lvl['price']:,.0f} 點 (+{lvl['price'] - current_price:,.0f} 點) [{tag}: {combos}]")
-        
-    lines.append("\n  【下方支撐 PRZ】:")
-    for lvl in nearby_prz.get('below', [])[:3]:
-        combos = " | ".join(lvl.get('combo_details', []))
-        count = len(lvl.get('combo_details', []))
-        tag = f"🔥超級共振 {count}組" if count > 1 else "單一組合"
-        lines.append(f"   - {lvl['price']:,.0f} 點 (-{current_price - lvl['price']:,.0f} 點) [{tag}: {combos}]")
+    below = prz_result['nearby'].get('below', [])
+    for lvl in below[:3]:
+        dist = price - lvl['price']
+        dist_pct = (dist / price) * 100
+        is_adv = lvl.get('is_resonance')
+        cat = "【進階】" if is_adv else "【一般】"
+        lines.append(f"   - 支撐 {cat}: {lvl['price']:,.0f} (-{dist:.0f}點 / -{dist_pct:.2f}%)")
         
     lines.append("\n==========================================")
     lines.append("系統提示: 本郵件由 C:\\monitor_PRZ\\auto_monitor.py 自動監控系統觸發發送。")
     return "\n".join(lines)
 
 def run_single_check():
-    """執行一次即時監控檢查"""
+    """執行單次即時監控檢查"""
     tz_tw = timezone(timedelta(hours=8))
     now_str = datetime.now(tz_tw).strftime('%Y-%m-%d %H:%M:%S')
     
-    current_price, latest_ts = get_current_price()
-    if current_price is None:
-        print(f"[{now_str}] ⚠️ 無法取得即時價格，將於下一分鐘重試...")
+    # 1. 檢查是否在交易時段內
+    if not is_trading_hours():
+        print(f"[{now_str}] 💤 非交易時段 (週末休市，或每日收盤冷卻期)，跳過分析監控。")
+        # 即使非開盤期間，仍進行外資三大法人盤後現貨通報檢查
+        try:
+            check_and_notify_fini()
+        except Exception as e:
+            print(f"  ⚠️ 外資現貨數據檢查異常: {e}")
         return
-        
-    all_data = fetch_all_timeframes()
-    all_swings = get_hybrid_swings(all_data)
-    
-    tf_pairs = {'5': None, '1': None}
-    if '5' in all_swings and not all_swings['5']['highs'].empty and not all_swings['5']['lows'].empty:
-        tf_pairs['5分K'] = (all_swings['5']['highs']['price'].max(), all_swings['5']['lows']['price'].min())
-    if '1' in all_swings and not all_swings['1']['highs'].empty and not all_swings['1']['lows'].empty:
-        tf_pairs['1分K'] = (all_swings['1']['highs']['price'].max(), all_swings['1']['lows']['price'].min())
-        
-    tf_pairs['日線權威箱體'] = (DAILY_MASTER_HIGH, DAILY_MASTER_LOW)
-    
-    # 移除 None key
-    tf_pairs = {k: v for k, v in tf_pairs.items() if v is not None}
-    
-    all_prz = calculate_multi_timeframe_prz(tf_pairs)
-    grouped_prz = group_prz_levels(all_prz, tolerance_points=3.0)
-    nearby_prz = get_grouped_nearby_prz(current_price, grouped_prz, n_min=3)
-    
-    trend_swings = {}
-    tf_map = {'D': 'daily', '15': '15min', '5': '5min', '1': '1min'}
-    for tf, swings in all_swings.items():
-        highs = swings.get('highs', None)
-        lows = swings.get('lows', None)
-        combined = []
-        if highs is not None and not highs.empty:
-            for _, row in highs.iterrows():
-                combined.append({'type': 'high', 'price': row['price'], 'bar_index': row['bar_index']})
-        if lows is not None and not lows.empty:
-            for _, row in lows.iterrows():
-                combined.append({'type': 'low', 'price': row['price'], 'bar_index': row['bar_index']})
-        combined.sort(key=lambda x: x['bar_index'])
-        trend_swings[tf_map.get(tf, tf)] = combined
-        
-    trend_info = determine_trend(trend_swings)
-    
-    flat_prz = []
-    for g in grouped_prz:
-        combos_str = " / ".join(g.get('combo_details', []))
-        flat_prz.append({
-            'price': g['price'],
-            'type': 'support' if g['price'] < current_price else 'resistance',
-            'name': combos_str,
-            'is_resonance': g.get('is_resonance', False)
-        })
-        
-    advisor_nearby = {
-        'support': [lvl for lvl in flat_prz if lvl['type'] == 'support'],
-        'resistance': [lvl for lvl in flat_prz if lvl['type'] == 'resistance']
-    }
-    advisor_nearby['support'].sort(key=lambda x: x['price'], reverse=True)
-    advisor_nearby['resistance'].sort(key=lambda x: x['price'])
-    
-    advice = generate_full_advice(
-        current_price=current_price,
-        nearby_prz=advisor_nearby,
-        trend_info=trend_info,
-        prz_levels=flat_prz,
-        has_position=None
-    )
-    
-    entry = advice.get('entry', {})
-    confidence = entry.get('confidence', '低')
-    direction = entry.get('direction', '觀望')
-    reason = entry.get('reason', '')
-    
-    print(f"[{now_str}] 📊 當前點位: {current_price:,.0f} | 方向: {direction} | 信心水準: {confidence}")
-    
-    # 檢查觸發條件
-    if confidence == '高':
-        # 建立目前狀態特徵碼 (方向 + 建議進場位 + 原因)
-        current_signal_key = {
-            'direction': direction,
-            'entry_zone': entry.get('entry_zone'),
-            'reason': reason,
-            'price': round(current_price)
-        }
-        
-        last_state = load_last_state()
-        last_key = last_state.get('signal_key', {})
-        
-        # 比較是否與前次不同
-        if current_signal_key != last_key:
-            print(f"[{now_str}] 🚨 發現【信心水準：高】新訊號！正在發送 Email 通知...")
-            
-            subject = f"【台指期 PRZ 警報】當前點位 {current_price:,.0f} 點 - 建議 {direction} (信心水準: 高)"
-            email_body = build_email_template(current_price, nearby_prz, advice)
-            
-            success = send_email_report(subject, email_body)
-            if success:
-                print(f"[{now_str}] ✅ Email 成功送達！已更新前次通知狀態。")
-                save_last_state({
-                    'timestamp': now_str,
-                    'price': current_price,
-                    'signal_key': current_signal_key
-                })
-        else:
-            print(f"[{now_str}] ℹ️ 偵測到高信心水準訊號，但與前次通知內容相同，跳過重複發送。")
 
-    # 檢查今日三大法人外資現貨買賣超數據是否發布
+    # 2. 進行 PRZ V2 核心分析
+    try:
+        analysis = run_analysis()
+        if not analysis or 'advice' not in analysis:
+            print(f"[{now_str}] ⚠️ V2 分析模組未回傳有效建議。")
+            return
+            
+        current_price = analysis['price']
+        box_wr = analysis['box']
+        trend_results = analysis['trend']
+        indicators = analysis['indicators']
+        breakout = analysis['breakout']
+        prz_result = analysis['prz']
+        advice = analysis['advice']
+        
+        long_plan = advice['long']
+        short_plan = advice['short']
+        summary = advice['summary']
+        
+        # 3. 判斷是否有高信心水準信號，並比對狀態防止重複發送
+        has_high_confidence = (long_plan['confidence'] == '🔥高' or short_plan['confidence'] == '🔥高')
+        
+        if has_high_confidence:
+            # 建立目前狀態特徵碼 (避免加入變動劇烈的 price，防止洗信)
+            current_signal_key = {
+                'recommended': summary['recommended'],
+                'long_confidence': long_plan['confidence'],
+                'short_confidence': short_plan['confidence'],
+                'long_entry': long_plan['entry_zone'],
+                'short_entry': short_plan['entry_zone']
+            }
+            
+            last_state = load_last_state()
+            last_key = last_state.get('signal_key', {})
+            
+            # 比較是否與前一次發送的訊號不同
+            if current_signal_key != last_key:
+                print(f"[{now_str}] 🚨 發現【信心水準：高】新訊號！正在發送 Email 通知...")
+                
+                subject = f"【PRZ V2 警報】建議 {summary['recommended']} (多空雙方案與關鍵PRZ分析)"
+                email_body = build_email_template_v2(
+                    current_price, box_wr, trend_results, indicators, breakout, prz_result, advice
+                )
+                
+                success = send_email_report(subject, email_body)
+                if success:
+                    print(f"[{now_str}] ✅ Email 成功送達！已更新前次通知狀態。")
+                    save_last_state({
+                        'timestamp': now_str,
+                        'price': current_price,
+                        'signal_key': current_signal_key,
+                        'fini_notified_date': last_state.get('fini_notified_date') # 保留外資通報狀態
+                    })
+            else:
+                print(f"[{now_str}] ℹ️ 偵測到高信心水準訊號，但與前次通知內容相同，跳過發送。")
+        else:
+            print(f"[{now_str}] 📊 監控中，當前做多勝率 {long_plan['win_rate']:.0f}% (信心:{long_plan['confidence']})，做空勝率 {short_plan['win_rate']:.0f}% (信心:{short_plan['confidence']})。")
+            
+    except Exception as e:
+        print(f"[{now_str}] ❌ 執行即時監控分析失敗: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # 4. 外資現貨買賣超數據檢查
     try:
         check_and_notify_fini()
     except Exception as e:
         print(f"  ⚠️ 外資現貨數據檢查異常: {e}")
 
-
 def start_monitoring_loop(interval_seconds=60):
     print("=" * 65)
-    print("  📡 台指期 PRZ 每分鐘即時監控服務已啟動...")
-    print("  ⭐ 觸發條件: 信心水準 == '高' 且與前次通知內容不同")
+    print("  📡 台指期 PRZ V2 每分鐘即時監控服務已啟動...")
+    print("  ⭐ 觸發條件: 做多或做空之信心水準 == '高' 且與前次通知內容不同")
     print(f"  ⏰ 檢查間隔: 每 {interval_seconds} 秒")
     print("=" * 65)
     
@@ -229,20 +248,17 @@ def start_monitoring_loop(interval_seconds=60):
         try:
             run_single_check()
         except Exception as e:
-            print(f"⚠️ 監控過程發生異常: {e}")
-        
+            print(f"⚠️ 監控循環異常: {e}")
         time.sleep(interval_seconds)
-
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='台指期 PRZ 自動監控服務')
-    parser.add_argument('--single-run', '-s', action='store_true', help='僅執行一次監控檢查 (適合 GitHub Actions)')
+    parser = argparse.ArgumentParser(description='台指期 PRZ V2 自動監控服務')
+    parser.add_argument('--single-run', '-s', action='store_true', help='僅執行一次監控檢查 (適合排程)')
     parser.add_argument('--interval', '-i', type=int, default=60, help='監控檢查間隔秒數 (預設 60 秒)')
     args = parser.parse_args()
     
     if args.single_run:
-        print("⚡ 執行單次即時監控檢查 (GitHub Cloud Actions)...")
         run_single_check()
     else:
         start_monitoring_loop(args.interval)
